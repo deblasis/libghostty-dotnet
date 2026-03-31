@@ -46,6 +46,8 @@ Shader "Ghostty/CRTEffect"
             TEXTURE2D(_MainTex);
             SAMPLER(sampler_MainTex);
 
+            float4 _MainTex_TexelSize; // (1/w, 1/h, w, h) provided by Unity
+
             CBUFFER_START(UnityPerMaterial)
                 float4 _MainTex_ST;
                 float4 _PhosphorColor;
@@ -94,7 +96,7 @@ Shader "Ghostty/CRTEffect"
                 half3 color = lum * _PhosphorColor.rgb * _Brightness;
 
                 // Phosphor glow: blur approximation by sampling neighbors
-                float2 texelSize = float2(1.0 / 1280.0, 1.0 / 720.0);
+                float2 texelSize = _MainTex_TexelSize.xy;
                 float glowLum = 0.0;
                 glowLum += dot(SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex,
                     uv + float2(-texelSize.x, 0)).rgb, float3(0.299, 0.587, 0.114));

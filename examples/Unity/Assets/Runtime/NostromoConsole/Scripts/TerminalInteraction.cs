@@ -47,6 +47,21 @@ namespace Ghostty.Unity.NostromoConsole
                 HandleClick(mousePos);
             }
 
+            // Send mouse release when button is released
+            bool releasedThisFrame = false;
+#if ENABLE_INPUT_SYSTEM
+            if (mouse != null)
+                releasedThisFrame = mouse.leftButton.wasReleasedThisFrame;
+#else
+            releasedThisFrame = Input.GetMouseButtonUp(0);
+#endif
+            if (releasedThisFrame && _terminal.IsFocused)
+            {
+                _terminal.SendMouseButton(
+                    ghostty_input_mouse_state_e.GHOSTTY_MOUSE_RELEASE,
+                    ghostty_input_mouse_button_e.GHOSTTY_MOUSE_BUTTON_LEFT);
+            }
+
 #if ENABLE_INPUT_SYSTEM
             // Escape to unfocus
             if (_terminal.IsFocused && Keyboard.current != null

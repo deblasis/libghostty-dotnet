@@ -51,5 +51,11 @@ namespace Ghostty.Unity.NostromoConsole
             if (_material != null)
                 _material.SetColor(PhosphorColorId, _currentColor);
         }
+
+        private void OnDestroy()
+        {
+            if (_material != null)
+                Destroy(_material);
+        }
     }
 }

@@ -25,6 +25,8 @@ namespace Ghostty.Unity
         private readonly ghostty_runtime_close_surface_cb _closeSurfaceCb;
         private readonly GCHandle[] _gcHandles;
 
+        private static int s_initCount;
+
         public Texture2D Texture => _texture;
         public IntPtr Surface => _surface;
         public IntPtr App => _app;
@@ -57,8 +59,9 @@ namespace Ghostty.Unity
 
         private void Initialize()
         {
-            // One-time ghostty init
-            GhosttyNative.ghostty_init();
+            // Thread-safe one-time ghostty init
+            if (System.Threading.Interlocked.Increment(ref s_initCount) == 1)
+                GhosttyNative.ghostty_init();
 
             // Create and finalize config
             var config = GhosttyNative.ghostty_config_new();
