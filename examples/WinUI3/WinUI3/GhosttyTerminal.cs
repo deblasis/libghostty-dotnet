@@ -167,7 +167,8 @@ internal sealed partial class GhosttyTerminal : SwapChainPanel, IDisposable
         var unknown = Marshal.GetIUnknownForObject(this);
         try
         {
-            Marshal.QueryInterface(unknown, in IID_ISwapChainPanelNative, out var native);
+            var hr = Marshal.QueryInterface(unknown, in IID_ISwapChainPanelNative, out var native);
+            Marshal.ThrowExceptionForHR(hr);
             return native;
         }
         finally
