@@ -117,22 +117,33 @@ internal sealed partial class GhosttyTerminal : SwapChainPanel, IDisposable
         var hwnd = GetWindowHandle(_window);
 
         _swapChainPanelNativePtr = GetSwapChainPanelNativePtr();
-
-        var dpi = GetDpiForWindow(hwnd);
-        _scale = dpi / USER_DEFAULT_SCREEN_DPI;
-
-        InstallWakeupHandler(hwnd);
-
-        // Wire keyboard to the window root so input works regardless of
-        // which XAML element has focus (SwapChainPanel focus is unreliable).
-        if (_window.Content is FrameworkElement root)
+        try
         {
-            root.PreviewKeyDown += OnKeyDown;
-            root.PreviewKeyUp += OnKeyUp;
-        }
+            var dpi = GetDpiForWindow(hwnd);
+            _scale = dpi / USER_DEFAULT_SCREEN_DPI;
 
-        _loaded = true;
-        TryCreateGhostty();
+            InstallWakeupHandler(hwnd);
+
+            // Wire keyboard to the window root so input works regardless of
+            // which XAML element has focus (SwapChainPanel focus is unreliable).
+            if (_window.Content is FrameworkElement root)
+            {
+                root.PreviewKeyDown += OnKeyDown;
+                root.PreviewKeyUp += OnKeyUp;
+            }
+
+            _loaded = true;
+            TryCreateGhostty();
+        }
+        catch
+        {
+            if (_swapChainPanelNativePtr != 0)
+            {
+                Marshal.Release(_swapChainPanelNativePtr);
+                _swapChainPanelNativePtr = 0;
+            }
+            throw;
+        }
     }
 
     private bool _loaded;
