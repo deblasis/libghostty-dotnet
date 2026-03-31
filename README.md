@@ -42,7 +42,7 @@ After setup, open any example `.slnx` in Visual Studio or run with `dotnet run`.
 | [WPF-Simple](examples/WPF-Simple/) | HwndHost embedding with GhosttyApp wrapper | Done |
 | [WPF-Direct](examples/WPF-Direct/) | HwndHost embedding with raw NativeMethods | Done |
 | [WinUI 3](examples/WinUI3/) | SwapChainPanel composition surface ([#3](https://github.com/deblasis/libghostty-dotnet/issues/3)) | Done |
-| Unity | In-game terminal via render texture | Planned |
+| [Unity](examples/Unity/) | Editor terminal + Nostromo CRT demo via shared DXGI texture | WIP |
 | Avalonia | Cross-platform NativeControlHost | Planned |
 
 ## Visual Testing
