@@ -159,12 +159,22 @@ public sealed class GhosttyApp : IDisposable
 
     public void SendText(string text)
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
+        var maxBytes = Encoding.UTF8.GetMaxByteCount(text.Length);
         unsafe
         {
-            fixed (byte* ptr = bytes)
+            if (maxBytes <= 256)
             {
-                NativeMethods.ghostty_surface_text(_surface, (nint)ptr, (nuint)bytes.Length);
+                byte* buf = stackalloc byte[maxBytes];
+                int len;
+                fixed (char* chars = text)
+                    len = Encoding.UTF8.GetBytes(chars, text.Length, buf, maxBytes);
+                NativeMethods.ghostty_surface_text(_surface, (nint)buf, (nuint)len);
+            }
+            else
+            {
+                var bytes = Encoding.UTF8.GetBytes(text);
+                fixed (byte* ptr = bytes)
+                    NativeMethods.ghostty_surface_text(_surface, (nint)ptr, (nuint)bytes.Length);
             }
         }
     }
