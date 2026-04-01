@@ -75,6 +75,8 @@ namespace Ghostty.Unity
         private unsafe void OnTextInput(char c)
         {
             if (!_focused || _ghosttyTexture == null) return;
+            // Filter control characters -- they are handled as key events
+            if (c < 0x20 || c == 0x7F) return;
 
             var text = c.ToString();
             var maxBytes = Encoding.UTF8.GetMaxByteCount(text.Length);

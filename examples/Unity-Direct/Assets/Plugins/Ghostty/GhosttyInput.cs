@@ -97,9 +97,12 @@ namespace Ghostty.Unity
 
             var mods = GetModsFromEvent(evt);
 
-            // If we have a printable character, send it as text
+            // If we have a printable character, send it as text.
+            // Filter control characters (backspace, tab, enter, escape, etc.)
+            // the same way the Win32 WM_CHAR handler does.
             IntPtr textPtr = IntPtr.Zero;
-            if (action == ghostty_input_action_e.GHOSTTY_ACTION_PRESS && evt.character != 0)
+            if (action == ghostty_input_action_e.GHOSTTY_ACTION_PRESS
+                && evt.character >= 0x20 && evt.character != 0x7F)
             {
                 var charStr = evt.character.ToString();
                 textPtr = Marshal.StringToCoTaskMemUTF8(charStr);
