@@ -42,7 +42,9 @@ After setup, open any example `.slnx` in Visual Studio or run with `dotnet run`.
 | [WPF-Simple](examples/WPF-Simple/) | HwndHost embedding with GhosttyApp wrapper | Done |
 | [WPF-Direct](examples/WPF-Direct/) | HwndHost embedding with raw NativeMethods | Done |
 | [WinUI 3](examples/WinUI3/) | SwapChainPanel composition surface ([#3](https://github.com/deblasis/libghostty-dotnet/issues/3)) | Done |
-| Unity | In-game terminal via render texture | Planned |
+| [SharedTexture](examples/SharedTexture/) | Offscreen rendering to shared DXGI texture (WinForms readback) | Done |
+| [Unity-Direct](examples/Unity-Direct/) | Unity 6 (URP) integration, pure C# with D3D11 staging texture readback | WIP |
+| [Unity-Bridge](examples/Unity-Bridge/) | Unity 6 (URP) integration, C++ native plugin with zero-copy GPU texture sharing | WIP |
 | Avalonia | Cross-platform NativeControlHost | Planned |
 
 ## Visual Testing

@@ -45,3 +45,13 @@ ci-test-visual:
 # Update screenshot baselines
 update-baselines:
     TEST_UPDATE_BASELINES=true dotnet test tests/Ghostty.Tests.Visual/Ghostty.Tests.Visual.csproj
+
+# Copy ghostty.dll to all example directories that need it.
+# Run after setup.ps1 or whenever libghostty is rebuilt.
+copy-dll:
+    @echo "Copying ghostty.dll to examples..."
+    mkdir -p examples/Unity-Direct/Assets/Plugins/Ghostty/x86_64
+    mkdir -p examples/Unity-Bridge/Assets/Plugins/Ghostty/x86_64
+    cp libghostty/lib/ghostty.dll examples/Unity-Direct/Assets/Plugins/Ghostty/x86_64/ghostty.dll
+    cp libghostty/lib/ghostty.dll examples/Unity-Bridge/Assets/Plugins/Ghostty/x86_64/ghostty.dll
+    @echo "Done."
