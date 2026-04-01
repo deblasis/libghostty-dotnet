@@ -49,7 +49,6 @@ namespace Ghostty.Unity
                 _renderer.material.SetTexture(materialProperty, _ghosttyTexture.Texture);
             }
 
-            _ghosttyTexture.SetOcclusion(true);
             _ghosttyTexture.SetFocus(false);
 
 #if ENABLE_INPUT_SYSTEM

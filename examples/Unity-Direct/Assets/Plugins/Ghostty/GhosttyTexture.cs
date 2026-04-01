@@ -95,11 +95,6 @@ namespace Ghostty.Unity
         {
             Debug.Log("GhosttyTexture: Initialize() starting");
 
-            // Suppress crash dialogs and install an exception filter that prevents
-            // ghostty background thread crashes from killing Unity's process.
-            SetErrorMode(0x0001 | 0x0002 | 0x8000);
-            _prevFilter = SetUnhandledExceptionFilter(Marshal.GetFunctionPointerForDelegate(_exceptionFilter));
-
             // All ghostty native calls must run on a Win32 thread with a large stack.
             // Unity's Mono threads have small stacks incompatible with Zig's stack probing.
             NativeThread.Run(() =>
@@ -274,6 +269,18 @@ namespace Ghostty.Unity
             // ghostty_app_tick must also run on a native thread
             NativeThread.Run(() => GhosttyNative.ghostty_app_tick(_app));
 
+            // Trigger on-demand rendering (shared texture mode skips the
+            // renderer thread, so we must explicitly request a frame).
+            NativeThread.Run(() => GhosttyNative.ghostty_surface_draw(_surface));
+
+            // Apply deferred resize now that draw has processed the new size
+            if (_pendingResize)
+            {
+                _pendingResize = false;
+                CreateStagingTexture();
+                CreateUnityTexture();
+            }
+
             if (_context == IntPtr.Zero || _staging == IntPtr.Zero || _texture == null)
                 return;
 
@@ -303,11 +310,15 @@ namespace Ghostty.Unity
                 int dstStride = (int)_width * 4;
                 byte* dst = (byte*)rawData.GetUnsafePtr();
 
+                // Copy rows in reverse order: D3D11 is top-down,
+                // Unity Texture2D raw data is bottom-up (OpenGL convention).
                 for (int y = 0; y < _height; y++)
                 {
+                    int srcRow = y;
+                    int dstRow = (int)_height - 1 - y;
                     Buffer.MemoryCopy(
-                        (byte*)mapped.pData + y * mapped.RowPitch,
-                        dst + y * dstStride,
+                        (byte*)mapped.pData + srcRow * mapped.RowPitch,
+                        dst + dstRow * dstStride,
                         dstStride,
                         dstStride);
                 }
@@ -316,6 +327,8 @@ namespace Ghostty.Unity
                 unmap(_context, _staging, 0);
             }
         }
+
+        private bool _pendingResize;
 
         public void Resize(uint width, uint height)
         {
@@ -327,8 +340,9 @@ namespace Ghostty.Unity
 
             NativeThread.Run(() => GhosttyNative.ghostty_surface_set_size(_surface, width, height));
 
-            CreateStagingTexture();
-            CreateUnityTexture();
+            // Defer staging/texture recreation to Tick() so it happens
+            // after ghostty_surface_draw has resized the shared texture.
+            _pendingResize = true;
         }
 
         public void SetFocus(bool focused)
@@ -350,26 +364,6 @@ namespace Ghostty.Unity
         }
 
         // ---- Callback implementations ----
-
-        [DllImport("kernel32.dll")]
-        private static extern uint SetErrorMode(uint uMode);
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr SetUnhandledExceptionFilter(IntPtr lpTopLevelExceptionFilter);
-
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate int UnhandledExceptionFilterDelegate(IntPtr exceptionInfo);
-
-        // EXCEPTION_CONTINUE_SEARCH = 0, EXCEPTION_EXECUTE_HANDLER = 1
-        private static readonly UnhandledExceptionFilterDelegate _exceptionFilter = ExceptionFilter;
-        private static IntPtr _prevFilter;
-
-        private static int ExceptionFilter(IntPtr exceptionInfo)
-        {
-            // Log and swallow -- prevents ghostty background thread crashes from killing Unity
-            Debug.LogWarning("GhosttyTexture: caught unhandled exception on background thread (ghostty internal)");
-            return 1; // EXCEPTION_EXECUTE_HANDLER -- terminate just that thread, not the process
-        }
 
         private static void OnWakeup(IntPtr userdata) { }
 

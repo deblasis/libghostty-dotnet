@@ -60,9 +60,8 @@ public class GhosttyEditorWindow : EditorWindow
         }
 
         _input = new GhosttyInput(_ghosttyTexture.Surface);
-        // TODO: SetOcclusion and SetFocus may trigger ghostty render thread crash
-        // _ghosttyTexture.SetOcclusion(true);
-        // _ghosttyTexture.SetFocus(true);
+        _ghosttyTexture.SetOcclusion(true);
+        _ghosttyTexture.SetFocus(true);
         _initialized = true;
     }
 

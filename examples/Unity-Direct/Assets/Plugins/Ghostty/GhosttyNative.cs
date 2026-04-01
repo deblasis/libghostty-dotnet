@@ -246,6 +246,9 @@ namespace Ghostty.Unity
         public static extern void ghostty_surface_refresh(IntPtr surface);
 
         [DllImport(GhosttyLib, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void ghostty_surface_draw(IntPtr surface);
+
+        [DllImport(GhosttyLib, CallingConvention = CallingConvention.Cdecl)]
         public static extern void ghostty_surface_set_size(
             IntPtr surface,
             uint width,
