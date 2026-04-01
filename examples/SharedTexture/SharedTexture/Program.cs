@@ -111,6 +111,7 @@ class MainForm : Form
         _busy = true;
 
         _ghostty.Tick();
+        _ghostty.Draw();
 
         // Lazy staging texture creation
         if (_staging == 0)
