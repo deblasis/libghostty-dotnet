@@ -81,6 +81,8 @@ namespace Ghostty.Unity
         private unsafe void OnTextInput(char c)
         {
             if (!_focused || _bridge == null) return;
+            // Filter control characters -- they are handled as key events
+            if (c < 0x20 || c == 0x7F) return;
             _bridge.SendText(c.ToString());
         }
 #endif

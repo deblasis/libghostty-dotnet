@@ -58,6 +58,7 @@ public class GhosttyEditorWindow : EditorWindow
         }
 
         _bridge.SetFocus(true);
+        _bridge.SetOcclusion(true);
         _initialized = true;
     }
 
@@ -109,8 +110,9 @@ public class GhosttyEditorWindow : EditorWindow
             if (scanCode != 0)
                 _bridge.SendKey(action, mods, scanCode);
 
-            // Send text for printable characters on key down
-            if (action == 1 && evt.character != 0)
+            // Send text for printable characters on key down.
+            // Filter control characters -- they are handled as key events.
+            if (action == 1 && evt.character >= 0x20 && evt.character != 0x7F)
                 _bridge.SendText(evt.character.ToString());
 
             evt.Use();

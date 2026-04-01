@@ -82,6 +82,12 @@ namespace Ghostty.Unity
                 Native.GhosttyBridge_SetFocus(_handle, focused);
         }
 
+        public void SetOcclusion(bool visible)
+        {
+            if (_handle != IntPtr.Zero)
+                Native.GhosttyBridge_SetOcclusion(_handle, visible);
+        }
+
         public void SetContentScale(double x, double y)
         {
             if (_handle != IntPtr.Zero)
@@ -166,6 +172,10 @@ namespace Ghostty.Unity
             [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
             public static extern void GhosttyBridge_SetFocus(
                 IntPtr handle, [MarshalAs(UnmanagedType.U1)] bool focused);
+
+            [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+            public static extern void GhosttyBridge_SetOcclusion(
+                IntPtr handle, [MarshalAs(UnmanagedType.U1)] bool visible);
 
             [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
             public static extern void GhosttyBridge_SetContentScale(
