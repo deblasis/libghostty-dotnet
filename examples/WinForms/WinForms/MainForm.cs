@@ -48,6 +48,8 @@ internal partial class TerminalPanel : Panel
     {
         // Make the panel focusable and accept keyboard input.
         SetStyle(ControlStyles.Selectable, true);
+        SetStyle(ControlStyles.UserPaint, true);
+        SetStyle(ControlStyles.AllPaintingInWmPaint, true);
         SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
         TabStop = true;
     }
@@ -244,6 +246,7 @@ public partial class MainForm : Form
     private SharedTextureHelper? _helper;
     private Bitmap? _bitmap;
     private bool _busy;
+    private bool _frameHeld;
     private System.Windows.Forms.Timer? _renderTimer;
 
     [LibraryImport("user32")]
@@ -297,10 +300,19 @@ public partial class MainForm : Form
             int nh = _terminalPanel.ClientSize.Height;
             if (nw > 0 && nh > 0 && (nw != w || nh != h))
             {
+                // Release any pending frame before resizing the helper,
+                // since the readback buffer may still be mapped.
+                if (_frameHeld)
+                {
+                    try { _helper?.ReleaseFrame(); } catch { }
+                    _frameHeld = false;
+                }
                 _helper?.Resize(nw, nh);
                 _bitmap?.Dispose();
                 _bitmap = new Bitmap(nw, nh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
                 _ghostty?.SetSize((uint)nw, (uint)nh);
+                w = nw;
+                h = nh;
             }
         };
 
@@ -338,14 +350,23 @@ public partial class MainForm : Form
             }
             var s = snap.Value;
 
-            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version, (int)s.width, (int)s.height);
             if (frame == null)
             {
                 _busy = false; return;
             }
 
+            _frameHeld = true;
             var f = frame.Value;
-            var bd = _bitmap!.LockBits(new Rectangle(0, 0, f.Width, f.Height),
+
+            // Ensure bitmap matches frame dimensions (auto-resize may have changed them)
+            if (_bitmap == null || _bitmap.Width != f.Width || _bitmap.Height != f.Height)
+            {
+                _bitmap?.Dispose();
+                _bitmap = new Bitmap(f.Width, f.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            }
+
+            var bd = _bitmap.LockBits(new Rectangle(0, 0, f.Width, f.Height),
                 System.Drawing.Imaging.ImageLockMode.WriteOnly,
                 System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             for (int y = 0; y < f.Height; y++)
@@ -357,9 +378,17 @@ public partial class MainForm : Form
             _bitmap.UnlockBits(bd);
 
             _helper.ReleaseFrame();
+            _frameHeld = false;
             _terminalPanel.Invalidate();
         }
-        catch { }
+        catch
+        {
+            if (_frameHeld)
+            {
+                try { _helper?.ReleaseFrame(); } catch { }
+                _frameHeld = false;
+            }
+        }
 
         _busy = false;
     }

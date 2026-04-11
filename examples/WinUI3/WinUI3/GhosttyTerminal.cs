@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Ghostty.Interop;
 using Ghostty.D3D12;
 using Microsoft.UI.Input;
@@ -7,20 +8,20 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using Windows.Graphics.Imaging;
 using Windows.System;
 
 namespace WinUI3Example;
 
-internal sealed partial class GhosttyTerminal : UserControl, IDisposable
+internal sealed partial class GhosttyTerminal : Grid, IDisposable
 {
     private GhosttyApp? _ghostty;
     private SharedTextureHelper? _helper;
-    private SoftwareBitmap? _softwareBitmap;
-    private SoftwareBitmapSource? _bitmapSource;
+    private WriteableBitmap? _writeableBitmap;
+    private byte[]? _rowBuffer;
     private DispatcherTimer? _timer;
     private readonly Window _window;
     private bool _disposed;
+    private bool _frameHeld;
     private double _scale = 1.0;
     private double _pendingWidth, _pendingHeight;
     private bool _loaded;
@@ -35,20 +36,17 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
     private static partial uint MapVirtualKeyW(uint uCode, uint uMapType);
 
     [LibraryImport("user32.dll")]
+    private static unsafe partial int ToUnicode(uint wVirtKey, uint wScanCode, byte* lpKeyState, char* pwszBuff, int cchBuff, uint wFlags);
+
+    [LibraryImport("user32.dll")]
+    private static unsafe partial int GetKeyboardState(byte* lpKeyState);
+
+    [LibraryImport("user32.dll")]
     private static partial uint GetDpiForWindow(IntPtr hwnd);
 
     // For getting window handle
     private static readonly Guid IID_IWindowNative =
         new("EECDBF0E-BAE9-4CB6-A68E-9598E1CB57BB");
-
-    // COM interface for accessing bitmap buffer data
-    [ComImport]
-    [Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private unsafe interface IMemoryBufferByteAccess
-    {
-        void GetBuffer(out byte* buffer, out uint capacity);
-    }
 
     private ghostty_input_mouse_button_e _lastMouseButton;
 
@@ -77,18 +75,15 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
 
         HorizontalAlignment = HorizontalAlignment.Stretch;
         VerticalAlignment = VerticalAlignment.Stretch;
-        HorizontalContentAlignment = HorizontalAlignment.Stretch;
-        VerticalContentAlignment = VerticalAlignment.Stretch;
-
-        IsTabStop = true;
 
         // Create Image as child
         _image = new Image
         {
-            Stretch = Stretch.UniformToFill,
+            Stretch = Stretch.Fill,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch
         };
+        Children.Add(_image);
 
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
@@ -103,32 +98,13 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
         LostFocus += OnLostFocus;
     }
 
-    protected override void OnApplyTemplate()
-    {
-        base.OnApplyTemplate();
-        // Add the image as a child when the control is loaded into the visual tree
-        if (_image.Parent == null)
-        {
-            // Create a simple Grid to host the Image
-            var grid = new Grid
-            {
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                VerticalAlignment = VerticalAlignment.Stretch
-            };
-            grid.Children.Add(_image);
-
-            // Set as content of the control
-            Content = grid;
-        }
-    }
-
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         var hwnd = GetWindowHandle(_window);
         var dpi = GetDpiForWindow(hwnd);
         _scale = dpi / USER_DEFAULT_SCREEN_DPI;
 
-        // Wire keyboard to window root (same pattern as before)
+        // Wire keyboard to window root
         if (_window.Content is FrameworkElement root)
         {
             root.PreviewKeyDown += OnKeyDown;
@@ -170,60 +146,55 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
     {
         if (_ghostty == null || _helper == null) return;
 
-        _ghostty.Tick();
-
-        var snap = _ghostty.SharedTextureSnapshot;
-        if (snap == null || snap.Value.resource_handle == 0) return;
-        var s = snap.Value;
-
-        var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
-        if (frame == null) return;
-
-        var f = frame.Value;
-
-        // Create or recreate SoftwareBitmap if size changed
-        if (_softwareBitmap == null || _softwareBitmap.PixelWidth != f.Width || _softwareBitmap.PixelHeight != f.Height)
+        try
         {
-            _softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, f.Width, f.Height, BitmapAlphaMode.Ignore);
-            _bitmapSource = new SoftwareBitmapSource();
-        }
+            _ghostty.Tick();
 
-        // Copy pixel data row-by-row into the SoftwareBitmap
-        unsafe
-        {
-            using (var bitmapBuffer = _softwareBitmap.LockBuffer(BitmapBufferAccessMode.Write))
-            using (var reference = bitmapBuffer.CreateReference())
+            var snap = _ghostty.SharedTextureSnapshot;
+            if (snap == null || snap.Value.resource_handle == 0)
+                return;
+            var s = snap.Value;
+
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version, (int)s.width, (int)s.height);
+            if (frame == null)
+                return;
+
+            _frameHeld = true;
+            var f = frame.Value;
+
+            // Create or recreate WriteableBitmap if size changed
+            if (_writeableBitmap == null || _writeableBitmap.PixelWidth != f.Width || _writeableBitmap.PixelHeight != f.Height)
             {
-                // Use COM interop to get direct pointer access
-                var byteAccess = (IMemoryBufferByteAccess)reference;
-                byte* buffer;
-                uint capacity;
-                byteAccess.GetBuffer(out buffer, out capacity);
+                _writeableBitmap = new WriteableBitmap(f.Width, f.Height);
+                _rowBuffer = new byte[f.Width * 4];
+            }
 
-                // Copy data row by row
+            // Copy pixel data row-by-row into WriteableBitmap via stream
+            using (var stream = _writeableBitmap.PixelBuffer.AsStream())
+            {
+                stream.Position = 0;
                 for (int y = 0; y < f.Height; y++)
                 {
-                    var src = (byte*)f.Data + y * f.RowPitch;
-                    var dst = buffer + y * f.Width * 4;
-                    Buffer.MemoryCopy(src, dst, f.Width * 4, f.Width * 4);
+                    nint src = (nint)(f.Data + (long)y * f.RowPitch);
+                    Marshal.Copy((IntPtr)src, _rowBuffer, 0, f.Width * 4);
+                    stream.Write(_rowBuffer, 0, f.Width * 4);
                 }
             }
+
+            _helper.ReleaseFrame();
+            _frameHeld = false;
+
+            _writeableBitmap.Invalidate();
+            _image.Source = _writeableBitmap;
         }
-
-        _helper.ReleaseFrame();
-
-        // Update Image source on UI thread (outside unsafe context)
-        DispatcherQueue.TryEnqueue(() =>
+        catch (Exception)
         {
-            var updateTask = UpdateImageSource();
-        });
-    }
-
-    private async System.Threading.Tasks.Task UpdateImageSource()
-    {
-        if (_bitmapSource != null && _softwareBitmap != null)
-            await _bitmapSource.SetBitmapAsync(_softwareBitmap);
-        _image.Source = _bitmapSource;
+            if (_frameHeld)
+            {
+                try { _helper?.ReleaseFrame(); } catch { }
+                _frameHeld = false;
+            }
+        }
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -238,7 +209,12 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
         }
         ApplySize();
 
-        // Resize helper
+        // Resize helper (release any held frame first)
+        if (_frameHeld)
+        {
+            try { _helper?.ReleaseFrame(); } catch { }
+            _frameHeld = false;
+        }
         int w = (int)(_pendingWidth * _scale);
         int h = (int)(_pendingHeight * _scale);
         if (w > 0 && h > 0)
@@ -263,6 +239,7 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
         if (_ghostty == null) return;
         var vk = (uint)e.Key;
         var scanCode = MapVirtualKeyW(vk, 0);
+        if (scanCode == 0) return;
 
         var key = new ghostty_input_key_s
         {
@@ -271,20 +248,36 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
             keycode = scanCode,
         };
         _ghostty.SendKey(key);
-        e.Handled = true;
+
+        // Try to get text character for printable keys
+        unsafe
+        {
+            byte* keyState = stackalloc byte[256];
+            char* charBuf = stackalloc char[2];
+            GetKeyboardState(keyState);
+            int rc = ToUnicode(vk, scanCode, keyState, charBuf, 2, 0);
+            if (rc > 0)
+            {
+                var text = new string(charBuf, 0, rc);
+                _ghostty.SendText(text);
+                e.Handled = true;
+            }
+        }
     }
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
         if (_ghostty == null) return;
+        var scanCode = MapVirtualKeyW((uint)e.Key, 0);
+        if (scanCode == 0) return;
+
         var key = new ghostty_input_key_s
         {
             action = ghostty_input_action_e.GHOSTTY_ACTION_RELEASE,
             mods = GetMods(),
-            keycode = MapVirtualKeyW((uint)e.Key, 0),
+            keycode = scanCode,
         };
         _ghostty.SendKey(key);
-        e.Handled = true;
     }
 
     // --- Mouse ---
@@ -310,7 +303,7 @@ internal sealed partial class GhosttyTerminal : UserControl, IDisposable
             e.Handled = true;
         }
         CapturePointer(e.Pointer);
-        Focus(FocusState.Pointer);
+        if (_window.Content is Control c) c.Focus(FocusState.Pointer);
     }
 
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)

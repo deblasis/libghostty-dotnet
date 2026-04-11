@@ -11,16 +11,16 @@ using Ghostty.D3D12;
 
 namespace WpfSimpleExample;
 
-internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposable
+internal partial class GhosttyTerminal : FrameworkElement, IDisposable
 {
     private GhosttyApp? _ghostty;
     private SharedTextureHelper? _helper;
     private WriteableBitmap? _bitmap;
     private DispatcherTimer? _timer;
     private bool _disposed;
+    private bool _frameHeld;
     private char _highSurrogate;
 
-    // Win32 constants for modifier keys
     private const int VK_SHIFT = 0x10;
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
@@ -40,13 +40,12 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
 
     public GhosttyTerminal()
     {
-        Stretch = Stretch.None;
         Focusable = true;
+        ClipToBounds = true;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
 
-        // Wire WPF input events
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
         PreviewTextInput += OnTextInput;
@@ -60,6 +59,11 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        Dispatcher.BeginInvoke(InitGhostty);
+    }
+
+    private void InitGhostty()
+    {
         var window = Window.GetWindow(this);
         if (window == null) return;
 
@@ -67,22 +71,31 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         uint dpi = GetDpiForWindow(hwnd);
         double scale = dpi / 96.0;
 
-        int w = (int)ActualWidth;
-        int h = (int)ActualHeight;
+        int w = (int)RenderSize.Width;
+        int h = (int)RenderSize.Height;
+        if (w <= 0 || h <= 0) { w = (int)window.ActualWidth; h = (int)window.ActualHeight; }
         if (w <= 0 || h <= 0) { w = 800; h = 600; }
 
-        _ghostty = new GhosttyApp(
-            w, h, scale,
-            wakeup: _ => { },
-            action: (_, _, _) => false,
-            readClipboard: (_, _, _) => false,
-            confirmReadClipboard: (_, _, _, _) => { },
-            writeClipboard: (_, _, _, _, _) => { },
-            closeSurface: (_, _) => Dispatcher.BeginInvoke(() => window.Close()));
+        try
+        {
+            _ghostty = new GhosttyApp(
+                w, h, scale,
+                wakeup: _ => { },
+                action: (_, _, _) => false,
+                readClipboard: (_, _, _) => false,
+                confirmReadClipboard: (_, _, _, _) => { },
+                writeClipboard: (_, _, _, _, _) => { },
+                closeSurface: (_, _) => Dispatcher.BeginInvoke(() => window.Close()));
 
-        _helper = new SharedTextureHelper(w, h);
+            _helper = new SharedTextureHelper(w, h);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Ghostty init failed: {ex.Message}", "Error");
+            return;
+        }
+
         _bitmap = new WriteableBitmap(w, h, dpi, dpi, PixelFormats.Bgra32, null);
-        Source = _bitmap;
 
         _ghostty.SetSize((uint)w, (uint)h);
         _ghostty.SetOcclusion(true);
@@ -104,41 +117,83 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         int h = (int)e.NewSize.Height;
         if (w <= 0 || h <= 0) return;
 
+        if (_frameHeld)
+        {
+            try { _helper.ReleaseFrame(); } catch { }
+            _frameHeld = false;
+        }
         _helper.Resize(w, h);
 
         var window = Window.GetWindow(this);
         uint dpi = window != null ? GetDpiForWindow(new WindowInteropHelper(window).Handle) : 96;
         _bitmap = new WriteableBitmap(w, h, dpi, dpi, PixelFormats.Bgra32, null);
-        Source = _bitmap;
 
         _ghostty.SetSize((uint)w, (uint)h);
+    }
+
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        // Take all available space
+        return availableSize;
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+        if (_bitmap != null)
+            dc.DrawImage(_bitmap, new Rect(0, 0, RenderSize.Width, RenderSize.Height));
     }
 
     private unsafe void DoFrame(object? sender, EventArgs e)
     {
         if (_ghostty == null || _helper == null || _bitmap == null) return;
 
-        _ghostty.Tick();
+        try
+        {
+            _ghostty.Tick();
 
-        var snap = _ghostty.SharedTextureSnapshot;
-        if (snap == null || snap.Value.resource_handle == 0) return;
-        var s = snap.Value;
+            var snap = _ghostty.SharedTextureSnapshot;
+            if (snap == null || snap.Value.resource_handle == 0)
+                return;
+            var s = snap.Value;
 
-        var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
-        if (frame == null) return;
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version, (int)s.width, (int)s.height);
+            if (frame == null)
+                return;
 
-        var f = frame.Value;
-        _bitmap.Lock();
-        for (int y = 0; y < f.Height; y++)
-            Buffer.MemoryCopy(
-                (byte*)f.Data + y * f.RowPitch,
-                (byte*)_bitmap.BackBuffer + y * _bitmap.BackBufferStride,
-                f.Width * 4,
-                f.Width * 4);
-        _bitmap.AddDirtyRect(new Int32Rect(0, 0, f.Width, f.Height));
-        _bitmap.Unlock();
+            _frameHeld = true;
+            var f = frame.Value;
 
-        _helper.ReleaseFrame();
+            if (_bitmap.PixelWidth != f.Width || _bitmap.PixelHeight != f.Height)
+            {
+                var window = Window.GetWindow(this);
+                uint dpi = window != null ? GetDpiForWindow(new WindowInteropHelper(window).Handle) : 96;
+                _bitmap = new WriteableBitmap(f.Width, f.Height, dpi, dpi, PixelFormats.Bgra32, null);
+            }
+
+            _bitmap.Lock();
+            for (int y = 0; y < f.Height; y++)
+                Buffer.MemoryCopy(
+                    (byte*)f.Data + y * f.RowPitch,
+                    (byte*)_bitmap.BackBuffer + y * _bitmap.BackBufferStride,
+                    f.Width * 4,
+                    f.Width * 4);
+            _bitmap.AddDirtyRect(new Int32Rect(0, 0, f.Width, f.Height));
+            _bitmap.Unlock();
+
+            _helper.ReleaseFrame();
+            _frameHeld = false;
+
+            InvalidateVisual();
+        }
+        catch (Exception)
+        {
+            if (_frameHeld)
+            {
+                try { _helper?.ReleaseFrame(); } catch { }
+                _frameHeld = false;
+            }
+        }
     }
 
     // --- Input handling via WPF events ---
@@ -158,7 +213,6 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
 
     private uint GetScanCode(Key key)
     {
-        // Map WPF Key to scan code using Win32 MapVirtualKey
         var vk = KeyInterop.VirtualKeyFromKey(key);
         return MapVirtualKeyW((uint)vk, 0);
     }
@@ -179,7 +233,7 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
             unshifted_codepoint = 0,
         };
         _ghostty.SendKey(key);
-        e.Handled = true;
+        // Don't mark handled - let TextInput fire for printable keys
     }
 
     private void OnKeyUp(object sender, KeyEventArgs e)
@@ -198,7 +252,6 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
             unshifted_codepoint = 0,
         };
         _ghostty.SendKey(key);
-        e.Handled = true;
     }
 
     private void OnTextInput(object sender, TextCompositionEventArgs e)

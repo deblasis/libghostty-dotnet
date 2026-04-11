@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -11,7 +10,7 @@ using Ghostty.D3D12;
 
 namespace WpfDirectExample;
 
-internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposable
+internal partial class GhosttyTerminal : FrameworkElement, IDisposable
 {
     private nint _app;
     private nint _surface;
@@ -19,6 +18,7 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
     private WriteableBitmap? _bitmap;
     private DispatcherTimer? _timer;
     private bool _disposed;
+    private bool _frameHeld;
     private char _highSurrogate;
     private GCHandle[] _pinnedDelegates = Array.Empty<GCHandle>();
 
@@ -26,7 +26,7 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
     private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5C;
+    private const int VK_RWIN = 0x5c;
     private const int VK_CAPITAL = 0x14;
     private const int VK_NUMLOCK = 0x90;
 
@@ -41,8 +41,8 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
 
     public GhosttyTerminal()
     {
-        Stretch = Stretch.None;
         Focusable = true;
+        ClipToBounds = true;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
@@ -60,6 +60,11 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        Dispatcher.BeginInvoke(InitGhostty);
+    }
+
+    private void InitGhostty()
+    {
         var window = Window.GetWindow(this);
         if (window == null) return;
 
@@ -67,80 +72,88 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         uint dpi = GetDpiForWindow(hwnd);
         double scale = dpi / 96.0;
 
-        int w = (int)ActualWidth;
-        int h = (int)ActualHeight;
+        int w = (int)RenderSize.Width;
+        int h = (int)RenderSize.Height;
+        if (w <= 0 || h <= 0) { w = (int)window.ActualWidth; h = (int)window.ActualHeight; }
         if (w <= 0 || h <= 0) { w = 800; h = 600; }
-
-        // Direct API -- no GhosttyApp wrapper
-        var result = NativeMethods.ghostty_init(0, nint.Zero);
-        if (result != 0) throw new InvalidOperationException("ghostty_init failed");
-
-        var config = NativeMethods.ghostty_config_new();
-        if (config == 0) throw new InvalidOperationException("ghostty_config_new failed");
 
         try
         {
-            NativeMethods.ghostty_config_load_default_files(config);
-            NativeMethods.ghostty_config_load_recursive_files(config);
-            NativeMethods.ghostty_config_finalize(config);
+            var result = NativeMethods.ghostty_init(0, nint.Zero);
+            if (result != 0) throw new InvalidOperationException("ghostty_init failed");
 
-            ghostty_runtime_wakeup_cb wakeup = _ => { };
-            ghostty_runtime_action_cb action = (_, _, _) => false;
-            ghostty_runtime_read_clipboard_cb readClipboard = (_, _, _) => false;
-            ghostty_runtime_confirm_read_clipboard_cb confirmReadClipboard = (_, _, _, _) => { };
-            ghostty_runtime_write_clipboard_cb writeClipboard = (_, _, _, _, _) => { };
-            ghostty_runtime_close_surface_cb closeSurface = (_, _) =>
-                Dispatcher.BeginInvoke(() => window.Close());
+            var config = NativeMethods.ghostty_config_new();
+            if (config == 0) throw new InvalidOperationException("ghostty_config_new failed");
 
-            _pinnedDelegates = new GCHandle[6];
-            _pinnedDelegates[0] = GCHandle.Alloc(wakeup);
-            _pinnedDelegates[1] = GCHandle.Alloc(action);
-            _pinnedDelegates[2] = GCHandle.Alloc(readClipboard);
-            _pinnedDelegates[3] = GCHandle.Alloc(confirmReadClipboard);
-            _pinnedDelegates[4] = GCHandle.Alloc(writeClipboard);
-            _pinnedDelegates[5] = GCHandle.Alloc(closeSurface);
-
-            var runtimeCfg = new ghostty_runtime_config_s
+            try
             {
-                userdata = nint.Zero,
-                supports_selection_clipboard = 0,
-                wakeup_cb = Marshal.GetFunctionPointerForDelegate(wakeup),
-                action_cb = Marshal.GetFunctionPointerForDelegate(action),
-                read_clipboard_cb = Marshal.GetFunctionPointerForDelegate(readClipboard),
-                confirm_read_clipboard_cb = Marshal.GetFunctionPointerForDelegate(confirmReadClipboard),
-                write_clipboard_cb = Marshal.GetFunctionPointerForDelegate(writeClipboard),
-                close_surface_cb = Marshal.GetFunctionPointerForDelegate(closeSurface),
-            };
+                NativeMethods.ghostty_config_load_default_files(config);
+                NativeMethods.ghostty_config_load_recursive_files(config);
+                NativeMethods.ghostty_config_finalize(config);
 
-            _app = NativeMethods.ghostty_app_new(in runtimeCfg, config);
+                ghostty_runtime_wakeup_cb wakeup = _ => { };
+                ghostty_runtime_action_cb action = (_, _, _) => false;
+                ghostty_runtime_read_clipboard_cb readClipboard = (_, _, _) => false;
+                ghostty_runtime_confirm_read_clipboard_cb confirmReadClipboard = (_, _, _, _) => { };
+                ghostty_runtime_write_clipboard_cb writeClipboard = (_, _, _, _, _) => { };
+                ghostty_runtime_close_surface_cb closeSurface = (_, _) =>
+                    Dispatcher.BeginInvoke(() => window.Close());
+
+                _pinnedDelegates = new GCHandle[6];
+                _pinnedDelegates[0] = GCHandle.Alloc(wakeup);
+                _pinnedDelegates[1] = GCHandle.Alloc(action);
+                _pinnedDelegates[2] = GCHandle.Alloc(readClipboard);
+                _pinnedDelegates[3] = GCHandle.Alloc(confirmReadClipboard);
+                _pinnedDelegates[4] = GCHandle.Alloc(writeClipboard);
+                _pinnedDelegates[5] = GCHandle.Alloc(closeSurface);
+
+                var runtimeCfg = new ghostty_runtime_config_s
+                {
+                    userdata = nint.Zero,
+                    supports_selection_clipboard = 0,
+                    wakeup_cb = Marshal.GetFunctionPointerForDelegate(wakeup),
+                    action_cb = Marshal.GetFunctionPointerForDelegate(action),
+                    read_clipboard_cb = Marshal.GetFunctionPointerForDelegate(readClipboard),
+                    confirm_read_clipboard_cb = Marshal.GetFunctionPointerForDelegate(confirmReadClipboard),
+                    write_clipboard_cb = Marshal.GetFunctionPointerForDelegate(writeClipboard),
+                    close_surface_cb = Marshal.GetFunctionPointerForDelegate(closeSurface),
+                };
+
+                _app = NativeMethods.ghostty_app_new(in runtimeCfg, config);
+            }
+            finally
+            {
+                NativeMethods.ghostty_config_free(config);
+            }
+
+            if (_app == 0) throw new InvalidOperationException("ghostty_app_new failed");
+
+            // Create surface with shared texture mode
+            var surfaceCfg = NativeMethods.ghostty_surface_config_new();
+            surfaceCfg.platform_tag = ghostty_platform_e.GHOSTTY_PLATFORM_WINDOWS;
+            surfaceCfg.platform.windows.hwnd = IntPtr.Zero;
+            surfaceCfg.platform.windows.shared_texture.enabled = 1;
+            surfaceCfg.platform.windows.shared_texture.width = (uint)w;
+            surfaceCfg.platform.windows.shared_texture.height = (uint)h;
+            surfaceCfg.scale_factor = scale;
+
+            _surface = NativeMethods.ghostty_surface_new(_app, in surfaceCfg);
+            if (_surface == 0)
+            {
+                NativeMethods.ghostty_app_free(_app);
+                _app = 0;
+                throw new InvalidOperationException("ghostty_surface_new failed");
+            }
+
+            _helper = new SharedTextureHelper(w, h);
         }
-        finally
+        catch (Exception ex)
         {
-            NativeMethods.ghostty_config_free(config);
+            MessageBox.Show($"Ghostty init failed: {ex.Message}", "Error");
+            return;
         }
 
-        if (_app == 0) throw new InvalidOperationException("ghostty_app_new failed");
-
-        // Create surface with shared texture mode
-        var surfaceCfg = NativeMethods.ghostty_surface_config_new();
-        surfaceCfg.platform_tag = ghostty_platform_e.GHOSTTY_PLATFORM_WINDOWS;
-        surfaceCfg.platform.windows.hwnd = IntPtr.Zero; // no HWND in shared texture mode
-        surfaceCfg.platform.windows.shared_texture.enabled = 1;
-        surfaceCfg.platform.windows.shared_texture.width = (uint)w;
-        surfaceCfg.platform.windows.shared_texture.height = (uint)h;
-        surfaceCfg.scale_factor = scale;
-
-        _surface = NativeMethods.ghostty_surface_new(_app, in surfaceCfg);
-        if (_surface == 0)
-        {
-            NativeMethods.ghostty_app_free(_app);
-            _app = 0;
-            throw new InvalidOperationException("ghostty_surface_new failed");
-        }
-
-        _helper = new SharedTextureHelper(w, h);
         _bitmap = new WriteableBitmap(w, h, dpi, dpi, PixelFormats.Bgra32, null);
-        Source = _bitmap;
 
         NativeMethods.ghostty_surface_set_occlusion(_surface, true);
         NativeMethods.ghostty_surface_set_focus(_surface, true);
@@ -152,32 +165,7 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         Focus();
     }
 
-    private unsafe void DoFrame(object? sender, EventArgs e)
-    {
-        if (_app == 0 || _surface == 0 || _helper == null || _bitmap == null) return;
-
-        NativeMethods.ghostty_app_tick(_app);
-
-        if (!NativeMethods.ghostty_surface_shared_texture(_surface, out var snap))
-            return;
-        if (snap.resource_handle == 0) return;
-
-        var frame = _helper.AcquireFrame(snap.resource_handle, snap.fence_handle, snap.fence_value, snap.version);
-        if (frame == null) return;
-
-        var f = frame.Value;
-        _bitmap.Lock();
-        for (int y = 0; y < f.Height; y++)
-            Buffer.MemoryCopy(
-                (byte*)f.Data + y * f.RowPitch,
-                (byte*)_bitmap.BackBuffer + y * _bitmap.BackBufferStride,
-                f.Width * 4,
-                f.Width * 4);
-        _bitmap.AddDirtyRect(new Int32Rect(0, 0, f.Width, f.Height));
-        _bitmap.Unlock();
-
-        _helper.ReleaseFrame();
-    }
+    private void OnUnloaded(object sender, RoutedEventArgs e) => Dispose();
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
@@ -186,14 +174,81 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         int h = (int)e.NewSize.Height;
         if (w <= 0 || h <= 0) return;
 
+        if (_frameHeld)
+        {
+            try { _helper.ReleaseFrame(); } catch { }
+            _frameHeld = false;
+        }
         _helper.Resize(w, h);
 
         var window = Window.GetWindow(this);
         uint dpi = window != null ? GetDpiForWindow(new WindowInteropHelper(window).Handle) : 96;
         _bitmap = new WriteableBitmap(w, h, dpi, dpi, PixelFormats.Bgra32, null);
-        Source = _bitmap;
 
         NativeMethods.ghostty_surface_set_size(_surface, (uint)w, (uint)h);
+    }
+
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        return availableSize;
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+        if (_bitmap != null)
+            dc.DrawImage(_bitmap, new Rect(0, 0, RenderSize.Width, RenderSize.Height));
+    }
+
+    private unsafe void DoFrame(object? sender, EventArgs e)
+    {
+        if (_app == 0 || _surface == 0 || _helper == null || _bitmap == null) return;
+
+        try
+        {
+            NativeMethods.ghostty_app_tick(_app);
+
+            if (!NativeMethods.ghostty_surface_shared_texture(_surface, out var snap))
+                return;
+            if (snap.resource_handle == 0) return;
+
+            var frame = _helper.AcquireFrame(snap.resource_handle, snap.fence_handle, snap.fence_value, snap.version, (int)snap.width, (int)snap.height);
+            if (frame == null)
+                return;
+
+            _frameHeld = true;
+            var f = frame.Value;
+
+            if (_bitmap.PixelWidth != f.Width || _bitmap.PixelHeight != f.Height)
+            {
+                var window = Window.GetWindow(this);
+                uint dpi = window != null ? GetDpiForWindow(new WindowInteropHelper(window).Handle) : 96;
+                _bitmap = new WriteableBitmap(f.Width, f.Height, dpi, dpi, PixelFormats.Bgra32, null);
+            }
+
+            _bitmap.Lock();
+            for (int y = 0; y < f.Height; y++)
+                Buffer.MemoryCopy(
+                    (byte*)f.Data + y * f.RowPitch,
+                    (byte*)_bitmap.BackBuffer + y * _bitmap.BackBufferStride,
+                    f.Width * 4,
+                    f.Width * 4);
+            _bitmap.AddDirtyRect(new Int32Rect(0, 0, f.Width, f.Height));
+            _bitmap.Unlock();
+
+            _helper.ReleaseFrame();
+            _frameHeld = false;
+
+            InvalidateVisual();
+        }
+        catch (Exception)
+        {
+            if (_frameHeld)
+            {
+                try { _helper?.ReleaseFrame(); } catch { }
+                _frameHeld = false;
+            }
+        }
     }
 
     // --- Input handling (direct native API) ---
@@ -228,7 +283,7 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
             unshifted_codepoint = 0,
         };
         NativeMethods.ghostty_surface_key(_surface, key);
-        e.Handled = true;
+        // Don't mark handled - let TextInput fire for printable keys
     }
 
     private void OnKeyUp(object sender, KeyEventArgs e)
@@ -248,7 +303,6 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
             unshifted_codepoint = 0,
         };
         NativeMethods.ghostty_surface_key(_surface, key);
-        e.Handled = true;
     }
 
     private void OnTextInput(object sender, TextCompositionEventArgs e)
@@ -328,8 +382,6 @@ internal partial class GhosttyTerminal : System.Windows.Controls.Image, IDisposa
         NativeMethods.ghostty_surface_mouse_scroll(_surface, 0, delta, 0);
         e.Handled = true;
     }
-
-    private void OnUnloaded(object sender, RoutedEventArgs e) => Dispose();
 
     public void Dispose()
     {
