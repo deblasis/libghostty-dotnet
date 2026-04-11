@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Ghostty.Interop;
+using Ghostty.D3D12;
 
 namespace WinFormsExample;
 
@@ -47,6 +48,7 @@ internal partial class TerminalPanel : Panel
     {
         // Make the panel focusable and accept keyboard input.
         SetStyle(ControlStyles.Selectable, true);
+        SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
         TabStop = true;
     }
 
@@ -239,16 +241,13 @@ public partial class MainForm : Form
 {
     private readonly TerminalPanel _terminalPanel;
     private GhosttyApp? _ghostty;
-
-    private const int WM_APP = 0x8000;
-    private const int WM_GHOSTTY_WAKEUP = WM_APP + 1;
+    private SharedTextureHelper? _helper;
+    private Bitmap? _bitmap;
+    private bool _busy;
+    private System.Windows.Forms.Timer? _renderTimer;
 
     [LibraryImport("user32")]
     private static partial uint GetDpiForWindow(IntPtr hwnd);
-
-    [LibraryImport("user32")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool PostMessageW(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
 
     public MainForm()
     {
@@ -270,10 +269,13 @@ public partial class MainForm : Form
     {
         uint dpi = GetDpiForWindow(Handle);
         double scale = dpi / 96.0;
+        int w = _terminalPanel.ClientSize.Width;
+        int h = _terminalPanel.ClientSize.Height;
+        if (w <= 0 || h <= 0) { w = ClientSize.Width; h = ClientSize.Height; }
 
         _ghostty = new GhosttyApp(
-            _terminalPanel.Handle, scale,
-            wakeup: _ => PostMessageW(Handle, WM_GHOSTTY_WAKEUP, IntPtr.Zero, IntPtr.Zero),
+            w, h, scale,
+            wakeup: _ => { },
             action: (_, _, _) => false,
             readClipboard: (_, _, _) => false,
             confirmReadClipboard: (_, _, _, _) => { },
@@ -281,39 +283,95 @@ public partial class MainForm : Form
             closeSurface: (_, _) => BeginInvoke(Close));
 
         _terminalPanel.SetGhostty(_ghostty);
+        _helper = new SharedTextureHelper(w, h);
+        _bitmap = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
-        _ghostty.SetSize((uint)_terminalPanel.ClientSize.Width, (uint)_terminalPanel.ClientSize.Height);
+        _ghostty.SetSize((uint)w, (uint)h);
         _ghostty.SetOcclusion(true);
         _ghostty.SetFocus(true);
 
+        // Resize handling
         _terminalPanel.Resize += (_, _) =>
-            _ghostty?.SetSize((uint)_terminalPanel.ClientSize.Width, (uint)_terminalPanel.ClientSize.Height);
+        {
+            int nw = _terminalPanel.ClientSize.Width;
+            int nh = _terminalPanel.ClientSize.Height;
+            if (nw > 0 && nh > 0 && (nw != w || nh != h))
+            {
+                _helper?.Resize(nw, nh);
+                _bitmap?.Dispose();
+                _bitmap = new Bitmap(nw, nh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                _ghostty?.SetSize((uint)nw, (uint)nh);
+            }
+        };
 
         _terminalPanel.GotFocus += (_, _) => _ghostty?.SetFocus(true);
         _terminalPanel.LostFocus += (_, _) => _ghostty?.SetFocus(false);
 
-        // Use Application.Idle to pump ghostty tick.
-        Application.Idle += (_, _) => _ghostty?.Tick();
+        // Paint the bitmap onto the panel
+        _terminalPanel.Paint += (_, e) =>
+        {
+            if (_bitmap != null)
+                e.Graphics.DrawImageUnscaled(_bitmap, 0, 0);
+        };
 
-        // Give the panel keyboard focus on startup.
+        // Timer-driven rendering
+        _renderTimer = new System.Windows.Forms.Timer { Interval = 16 };
+        _renderTimer.Tick += (_, _) => DoFrame();
+        _renderTimer.Start();
+
         _terminalPanel.Focus();
     }
 
-    protected override void WndProc(ref Message m)
+    private unsafe void DoFrame()
     {
-        switch ((uint)m.Msg)
-        {
-            case WM_GHOSTTY_WAKEUP:
-                _ghostty?.Tick();
-                m.Result = IntPtr.Zero;
-                return;
-        }
+        if (_busy || _ghostty == null || _helper == null) return;
+        _busy = true;
 
-        base.WndProc(ref m);
+        try
+        {
+            _ghostty.Tick();
+
+            var snap = _ghostty.SharedTextureSnapshot;
+            if (snap == null || snap.Value.resource_handle == 0)
+            {
+                _busy = false; return;
+            }
+            var s = snap.Value;
+
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
+            if (frame == null)
+            {
+                _busy = false; return;
+            }
+
+            var f = frame.Value;
+            var bd = _bitmap!.LockBits(new Rectangle(0, 0, f.Width, f.Height),
+                System.Drawing.Imaging.ImageLockMode.WriteOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            for (int y = 0; y < f.Height; y++)
+                Buffer.MemoryCopy(
+                    (byte*)f.Data + y * f.RowPitch,
+                    (byte*)bd.Scan0 + y * bd.Stride,
+                    f.Width * 4,
+                    f.Width * 4);
+            _bitmap.UnlockBits(bd);
+
+            _helper.ReleaseFrame();
+            _terminalPanel.Invalidate();
+        }
+        catch { }
+
+        _busy = false;
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        _renderTimer?.Stop();
+        _renderTimer?.Dispose();
+        _helper?.Dispose();
+        _helper = null;
+        _bitmap?.Dispose();
+        _bitmap = null;
         _ghostty?.Dispose();
         _ghostty = null;
     }
