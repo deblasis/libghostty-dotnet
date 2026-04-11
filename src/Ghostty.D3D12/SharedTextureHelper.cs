@@ -20,6 +20,7 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     private nint _commandAllocator;
     private nint _commandList;
     private nint _readbackBuffer;
+    private bool _readbackMapped;
     private nint _copyFence;
     private ulong _copyFenceValue;
     private nint _copyFenceEvent;
@@ -139,10 +140,17 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     /// <param name="version">Version number to detect texture changes.</param>
     /// <returns>Frame data if successful, null if the device is not available or acquisition fails.</returns>
     /// <exception cref="ObjectDisposedException">If the helper has been disposed.</exception>
-    public FrameData? AcquireFrame(nint resourceHandle, nint fenceHandle, ulong fenceValue, ulong version)
+    public FrameData? AcquireFrame(nint resourceHandle, nint fenceHandle, ulong fenceValue, ulong version, int textureWidth = 0, int textureHeight = 0)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(SharedTextureHelper));
         if (_device == 0) return null;
+
+        // If the shared texture dimensions don't match our readback buffer,
+        // resize now to avoid buffer overflow during copy.
+        int tw = textureWidth > 0 ? textureWidth : _width;
+        int th = textureHeight > 0 ? textureHeight : _height;
+        if (tw != _width || th != _height)
+            Resize(tw, th);
 
         nint pBarrier = nint.Zero;
         nint pSrcLoc = nint.Zero;
@@ -246,6 +254,7 @@ public sealed unsafe class SharedTextureHelper : IDisposable
 
             if (D3D12.ResourceMap(_readbackBuffer, 0, 0, out var pData) >= 0)
             {
+                _readbackMapped = true;
                 return new FrameData(pData, _width, _height, rowPitch);
             }
 
@@ -268,9 +277,10 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     public void ReleaseFrame()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(SharedTextureHelper));
-        if (_readbackBuffer != 0)
+        if (_readbackBuffer != 0 && _readbackMapped)
         {
             D3D12.ResourceUnmap(_readbackBuffer, 0, 0);
+            _readbackMapped = false;
         }
     }
 
@@ -284,8 +294,15 @@ public sealed unsafe class SharedTextureHelper : IDisposable
         _width = width;
         _height = height;
 
+        // Unmap the readback buffer if it's still mapped (from a pending AcquireFrame).
+        // Releasing a mapped D3D12 resource is undefined behavior and crashes.
         if (_readbackBuffer != 0)
         {
+            if (_readbackMapped)
+            {
+                D3D12.ResourceUnmap(_readbackBuffer, 0, 0);
+                _readbackMapped = false;
+            }
             D3D12.Release(_readbackBuffer);
             _readbackBuffer = 0;
         }

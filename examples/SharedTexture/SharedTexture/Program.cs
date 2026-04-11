@@ -97,7 +97,7 @@ class MainForm : Form
             }
             var s = snap.Value;
 
-            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version, (int)s.width, (int)s.height);
             if (frame == null)
             {
                 _busy = false; return;

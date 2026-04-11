@@ -10,12 +10,13 @@ internal static partial class Program
     private static GhosttyApp? _ghostty;
     private static char _highSurrogate;
     private static SharedTextureHelper? _helper;
-    private static FrameData? _pendingFrame;
 
     private const int WM_APP = 0x8000;
     private const int WM_GHOSTTY_WAKEUP = WM_APP + 1;
     private const int WM_GHOSTTY_RESIZE_TIMER = 1;
+    private const int WM_GHOSTTY_RENDER_TIMER = 2;
     private const int RESIZE_TIMER_MS = 8;
+    private const int RENDER_TIMER_MS = 16;
 
     // --- Win32 P/Invoke ---
 
@@ -60,6 +61,9 @@ internal static partial class Program
 
     [LibraryImport("user32")]
     private static partial short GetKeyState(int vk);
+
+    [LibraryImport("user32")]
+    private static partial short GetAsyncKeyState(int vk);
 
     [LibraryImport("user32")]
     private static partial void PostQuitMessage(int exitCode);
@@ -238,33 +242,114 @@ internal static partial class Program
         return sc;
     }
 
+    /// <summary>
+    /// Gets the scan code for a virtual key. Falls back to a lookup table
+    /// when LPARAM scan code is 0 (happens with FlaUI's SendInput).
+    /// </summary>
+    private static uint GetScanCode(int vk, IntPtr lp)
+    {
+        uint sc = ScanCodeFromLParam(lp);
+        if (sc != 0) return sc;
+        // FlaUI's SendInput doesn't set scan codes. Use known mappings.
+        return vk switch
+        {
+            0x0D => 0x1C,       // VK_RETURN
+            0x08 => 0x0E,       // VK_BACK
+            0x09 => 0x0F,       // VK_TAB
+            0x1B => 0x01,       // VK_ESCAPE
+            0x21 => 0xE049,     // VK_PRIOR (Page Up)
+            0x22 => 0xE051,     // VK_NEXT (Page Down)
+            0x23 => 0xE04F,     // VK_END
+            0x24 => 0xE047,     // VK_HOME
+            0x25 => 0xE04B,     // VK_LEFT
+            0x26 => 0xE048,     // VK_UP
+            0x27 => 0xE04D,     // VK_RIGHT
+            0x28 => 0xE050,     // VK_DOWN
+            0x2D => 0xE052,     // VK_INSERT
+            0x2E => 0xE053,     // VK_DELETE
+            0x70 => 0x3B, 0x71 => 0x3C, 0x72 => 0x3D, 0x73 => 0x3E, // F1-F4
+            0x74 => 0x3F, 0x75 => 0x40, 0x76 => 0x41, 0x77 => 0x42, // F5-F8
+            0x78 => 0x43, 0x79 => 0x44, 0x7A => 0x57, 0x7B => 0x58, // F9-F12
+            // Printable ASCII: use VK code as rough scancode basis
+            >= 0x30 and <= 0x39 => (uint)vk,  // 0-9
+            >= 0x41 and <= 0x5A => (uint)vk,  // A-Z
+            0x20 => 0x39,       // VK_SPACE
+            _ => 0
+        };
+    }
+
+    // Track modifier state from WM_KEYDOWN/WM_KEYUP messages.
+    // GetKeyState reads from the thread's message queue state which can lag behind
+    // the physical key state when FlaUI's SendInput messages are batched.
+    // We also fall back to GetAsyncKeyState for edge cases.
+    private static bool _shiftHeld, _ctrlHeld, _altHeld, _superHeld;
+
     private static ghostty_input_mods_e CurrentMods()
     {
         var mods = ghostty_input_mods_e.GHOSTTY_MODS_NONE;
-        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) mods |= ghostty_input_mods_e.GHOSTTY_MODS_SHIFT;
-        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) mods |= ghostty_input_mods_e.GHOSTTY_MODS_CTRL;
-        if ((GetKeyState(VK_MENU) & 0x8000) != 0) mods |= ghostty_input_mods_e.GHOSTTY_MODS_ALT;
-        if ((GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0)
-            mods |= ghostty_input_mods_e.GHOSTTY_MODS_SUPER;
+        // Use tracked state first, then cross-check with async key state
+        bool shift = _shiftHeld || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        bool ctrl = _ctrlHeld || (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool alt = _altHeld || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        bool super = _superHeld
+            || (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+        if (shift) mods |= ghostty_input_mods_e.GHOSTTY_MODS_SHIFT;
+        if (ctrl) mods |= ghostty_input_mods_e.GHOSTTY_MODS_CTRL;
+        if (alt) mods |= ghostty_input_mods_e.GHOSTTY_MODS_ALT;
+        if (super) mods |= ghostty_input_mods_e.GHOSTTY_MODS_SUPER;
         if ((GetKeyState(VK_CAPITAL) & 0x0001) != 0) mods |= ghostty_input_mods_e.GHOSTTY_MODS_CAPS;
         if ((GetKeyState(VK_NUMLOCK) & 0x0001) != 0) mods |= ghostty_input_mods_e.GHOSTTY_MODS_NUM;
         return mods;
     }
 
+    private static void TrackModifiers(int vk, bool down)
+    {
+        switch (vk)
+        {
+            case VK_SHIFT: _shiftHeld = down; break;
+            case VK_CONTROL: _ctrlHeld = down; break;
+            case VK_MENU: _altHeld = down; break;
+            case VK_LWIN: case VK_RWIN: _superHeld = down; break;
+        }
+    }
+
     // --- Rendering ---
+
+    private static FrameData? _pendingFrame;
+    private static bool _frameHeld; // true when AcquireFrame returned but ReleaseFrame not yet called
 
     private static unsafe void RenderFrame()
     {
         if (_ghostty == null || _helper == null) return;
-        var snap = _ghostty.SharedTextureSnapshot;
-        if (snap == null || snap.Value.resource_handle == 0) return;
-        var s = snap.Value;
 
-        var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
-        if (frame == null) return;
+        _ghostty.Tick();
 
-        _pendingFrame = frame;
-        InvalidateRect(_hwnd, IntPtr.Zero, false);
+        try
+        {
+            var snap = _ghostty.SharedTextureSnapshot;
+            if (snap == null || snap.Value.resource_handle == 0) return;
+            var s = snap.Value;
+
+            var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version, (int)s.width, (int)s.height);
+            if (frame == null) return;
+
+            _pendingFrame = frame;
+            _frameHeld = true;
+            InvalidateRect(_hwnd, IntPtr.Zero, false);
+            UpdateWindow(_hwnd);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"RenderFrame acquire error: {ex}");
+            if (_frameHeld)
+            {
+                try { _helper?.ReleaseFrame(); } catch { }
+                _frameHeld = false;
+            }
+            _pendingFrame = null;
+        }
     }
 
     // --- WndProc ---
@@ -273,24 +358,23 @@ internal static partial class Program
     {
         switch (msg)
         {
-            case WM_GHOSTTY_WAKEUP:
-                _ghostty?.Tick();
-                RenderFrame();
-                return IntPtr.Zero;
-
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
             {
+                var vk = (int)wp;
+                TrackModifiers(vk, true);
                 if (_ghostty == null) break;
+                var sc = GetScanCode(vk, lp);
                 var repeat = ((long)lp & (1 << 30)) != 0;
+                var mods = CurrentMods();
                 var key = new ghostty_input_key_s
                 {
                     action = repeat
                         ? ghostty_input_action_e.GHOSTTY_ACTION_REPEAT
                         : ghostty_input_action_e.GHOSTTY_ACTION_PRESS,
-                    mods = CurrentMods(),
+                    mods = mods,
                     consumed_mods = ghostty_input_mods_e.GHOSTTY_MODS_NONE,
-                    keycode = ScanCodeFromLParam(lp),
+                    keycode = sc,
                     composing = 0,
                     unshifted_codepoint = 0,
                 };
@@ -301,13 +385,15 @@ internal static partial class Program
             case WM_KEYUP:
             case WM_SYSKEYUP:
             {
+                var vk = (int)wp;
+                TrackModifiers(vk, false);
                 if (_ghostty == null) break;
                 var key = new ghostty_input_key_s
                 {
                     action = ghostty_input_action_e.GHOSTTY_ACTION_RELEASE,
                     mods = CurrentMods(),
                     consumed_mods = ghostty_input_mods_e.GHOSTTY_MODS_NONE,
-                    keycode = ScanCodeFromLParam(lp),
+                    keycode = GetScanCode(vk, lp),
                     composing = 0,
                     unshifted_codepoint = 0,
                 };
@@ -386,6 +472,7 @@ internal static partial class Program
                 if (_ghostty == null) break;
                 double delta = GET_WHEEL_DELTA_WPARAM(wp) / 120.0;
                 _ghostty.SendMouseScroll(0, delta, 0);
+                RenderFrame();
                 return IntPtr.Zero;
             }
 
@@ -407,8 +494,14 @@ internal static partial class Program
                 return IntPtr.Zero;
 
             case WM_TIMER:
-                if ((nuint)(nint)wp == WM_GHOSTTY_RESIZE_TIMER)
+                if ((nuint)(nint)wp == WM_GHOSTTY_RENDER_TIMER)
+                {
+                    RenderFrame();
+                }
+                else if ((nuint)(nint)wp == WM_GHOSTTY_RESIZE_TIMER)
+                {
                     _ghostty?.Tick();
+                }
                 return IntPtr.Zero;
 
             case WM_SIZE:
@@ -417,6 +510,14 @@ internal static partial class Program
                 int h = (ushort)HIWORD(lp);
                 if (w > 0 && h > 0)
                 {
+                    // Release any pending frame before resizing the helper,
+                    // since the readback buffer may still be mapped.
+                    if (_frameHeld)
+                    {
+                        try { _helper?.ReleaseFrame(); } catch { }
+                        _frameHeld = false;
+                    }
+                    _pendingFrame = null;
                     _helper?.Resize(w, h);
                     _ghostty?.SetSize((uint)w, (uint)h);
                 }
@@ -446,8 +547,9 @@ internal static partial class Program
             }
 
             case WM_DESTROY:
-                _helper?.Dispose();
+                KillTimer(hwnd, WM_GHOSTTY_RENDER_TIMER);
                 KillTimer(hwnd, WM_GHOSTTY_RESIZE_TIMER);
+                _helper?.Dispose();
                 PostQuitMessage(0);
                 return IntPtr.Zero;
 
@@ -456,29 +558,42 @@ internal static partial class Program
                 if (_pendingFrame != null && _helper != null)
                 {
                     var f = _pendingFrame.Value;
-                    var psPtr = Marshal.AllocHGlobal(64); // PAINTSTRUCT is 64 bytes
+                    var psPtr = Marshal.AllocHGlobal(64);
                     try
                     {
                         var hdc = BeginPaint(_hwnd, psPtr);
 
-                        // Setup BITMAPINFOHEADER for top-down 32bpp BGRA
                         var bmi = new BITMAPINFOHEADER
                         {
                             biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
                             biWidth = f.Width,
-                            biHeight = -f.Height, // negative = top-down
+                            biHeight = -f.Height,
                             biPlanes = 1,
                             biBitCount = 32,
-                            biCompression = 0, // BI_RGB
+                            biCompression = 0,
                         };
+
+                        // D3D12 readback row pitch is 256-byte aligned; copy to packed buffer
+                        int stride = f.Width * 4;
+                        nint packed = Marshal.AllocHGlobal(stride * f.Height);
                         nint pBmi = Marshal.AllocHGlobal(Marshal.SizeOf<BITMAPINFOHEADER>());
                         try
                         {
+                            unsafe
+                            {
+                                for (int y = 0; y < f.Height; y++)
+                                    Buffer.MemoryCopy(
+                                        (byte*)f.Data + y * f.RowPitch,
+                                        (byte*)packed + y * stride,
+                                        stride,
+                                        stride);
+                            }
                             Marshal.StructureToPtr(bmi, pBmi, false);
-                            SetDIBitsToDevice(hdc, 0, 0, (uint)f.Width, (uint)f.Height, 0, 0, 0, (uint)f.Height, f.Data, pBmi, 0);
+                            SetDIBitsToDevice(hdc, 0, 0, (uint)f.Width, (uint)f.Height, 0, 0, 0, (uint)f.Height, packed, pBmi, 0);
                         }
                         finally
                         {
+                            Marshal.FreeHGlobal(packed);
                             Marshal.FreeHGlobal(pBmi);
                         }
 
@@ -490,10 +605,11 @@ internal static partial class Program
                     }
 
                     _helper.ReleaseFrame();
+                    _frameHeld = false;
                     _pendingFrame = null;
                     return IntPtr.Zero;
                 }
-                break; // fall through to DefWindowProc if no frame
+                break;
             }
         }
 
@@ -551,7 +667,7 @@ internal static partial class Program
         {
             _ghostty = new GhosttyApp(
                 width, height, scale,
-                wakeup: _ => PostMessageW(_hwnd, WM_GHOSTTY_WAKEUP, IntPtr.Zero, IntPtr.Zero),
+                wakeup: _ => { },
                 action: (_, _, _) => false,
                 readClipboard: (_, _, _) => false,
                 confirmReadClipboard: (_, _, _, _) => { },
@@ -559,6 +675,10 @@ internal static partial class Program
                 closeSurface: (_, _) => PostMessageW(_hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero));
 
             _helper = new SharedTextureHelper(width, height);
+
+            _ghostty.SetSize((uint)width, (uint)height);
+            _ghostty.SetFocus(true);
+            _ghostty.SetOcclusion(true);
         }
         catch (Exception ex)
         {
@@ -568,8 +688,11 @@ internal static partial class Program
 
         ShowWindow(_hwnd, SW_SHOWDEFAULT);
         UpdateWindow(_hwnd);
-        _ghostty.SetOcclusion(true);
-        _ghostty.SetFocus(true);
+
+        // Start render timer for continuous Tick() + frame updates (~60 FPS).
+        // Ghostty may need multiple Tick() calls before producing a new shared
+        // texture frame, so a regular timer ensures prompt rendering.
+        SetTimer(_hwnd, WM_GHOSTTY_RENDER_TIMER, RENDER_TIMER_MS, IntPtr.Zero);
 
         while (GetMessageW(out var msg, IntPtr.Zero, 0, 0))
         {
