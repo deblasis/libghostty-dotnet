@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Ghostty.Interop;
+using Ghostty.D3D12;
 
 namespace Win32Example;
 
@@ -8,6 +9,8 @@ internal static partial class Program
     private static IntPtr _hwnd;
     private static GhosttyApp? _ghostty;
     private static char _highSurrogate;
+    private static SharedTextureHelper? _helper;
+    private static FrameData? _pendingFrame;
 
     private const int WM_APP = 0x8000;
     private const int WM_GHOSTTY_WAKEUP = WM_APP + 1;
@@ -97,6 +100,20 @@ internal static partial class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool AllocConsole();
 
+    [LibraryImport("user32")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool InvalidateRect(IntPtr hwnd, IntPtr rect, [MarshalAs(UnmanagedType.Bool)] bool erase);
+
+    [LibraryImport("user32")]
+    private static partial IntPtr BeginPaint(IntPtr hwnd, IntPtr lpPaint);
+
+    [LibraryImport("user32")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool EndPaint(IntPtr hwnd, IntPtr lpPaint);
+
+    [LibraryImport("gdi32")]
+    private static partial int SetDIBitsToDevice(IntPtr hdc, int xDest, int yDest, uint dw, uint dh, int xSrc, int ySrc, uint StartScan, uint ScanLines, IntPtr lpBits, IntPtr lpbmi, uint ColorUse);
+
     private delegate IntPtr WndProcDelegate(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -132,6 +149,34 @@ internal static partial class Program
     private struct RECT
     {
         public int left, top, right, bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PAINTSTRUCT
+    {
+        public IntPtr hdc;
+        public int fErase;
+        public int rcPaint_left, rcPaint_top, rcPaint_right, rcPaint_bottom;
+        public int fRestore;
+        public int fIncUpdate;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+        public byte[] rgbReserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
     }
 
     // --- Constants ---
@@ -206,6 +251,22 @@ internal static partial class Program
         return mods;
     }
 
+    // --- Rendering ---
+
+    private static unsafe void RenderFrame()
+    {
+        if (_ghostty == null || _helper == null) return;
+        var snap = _ghostty.SharedTextureSnapshot;
+        if (snap == null || snap.Value.resource_handle == 0) return;
+        var s = snap.Value;
+
+        var frame = _helper.AcquireFrame(s.resource_handle, s.fence_handle, s.fence_value, s.version);
+        if (frame == null) return;
+
+        _pendingFrame = frame;
+        InvalidateRect(_hwnd, IntPtr.Zero, false);
+    }
+
     // --- WndProc ---
 
     private static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp)
@@ -214,6 +275,7 @@ internal static partial class Program
         {
             case WM_GHOSTTY_WAKEUP:
                 _ghostty?.Tick();
+                RenderFrame();
                 return IntPtr.Zero;
 
             case WM_KEYDOWN:
@@ -350,8 +412,16 @@ internal static partial class Program
                 return IntPtr.Zero;
 
             case WM_SIZE:
-                _ghostty?.SetSize((uint)(ushort)LOWORD(lp), (uint)(ushort)HIWORD(lp));
+            {
+                int w = (ushort)LOWORD(lp);
+                int h = (ushort)HIWORD(lp);
+                if (w > 0 && h > 0)
+                {
+                    _helper?.Resize(w, h);
+                    _ghostty?.SetSize((uint)w, (uint)h);
+                }
                 return IntPtr.Zero;
+            }
 
             case WM_SETFOCUS:
                 _ghostty?.SetFocus(true);
@@ -376,9 +446,55 @@ internal static partial class Program
             }
 
             case WM_DESTROY:
+                _helper?.Dispose();
                 KillTimer(hwnd, WM_GHOSTTY_RESIZE_TIMER);
                 PostQuitMessage(0);
                 return IntPtr.Zero;
+
+            case 0x000F: // WM_PAINT
+            {
+                if (_pendingFrame != null && _helper != null)
+                {
+                    var f = _pendingFrame.Value;
+                    var psPtr = Marshal.AllocHGlobal(64); // PAINTSTRUCT is 64 bytes
+                    try
+                    {
+                        var hdc = BeginPaint(_hwnd, psPtr);
+
+                        // Setup BITMAPINFOHEADER for top-down 32bpp BGRA
+                        var bmi = new BITMAPINFOHEADER
+                        {
+                            biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                            biWidth = f.Width,
+                            biHeight = -f.Height, // negative = top-down
+                            biPlanes = 1,
+                            biBitCount = 32,
+                            biCompression = 0, // BI_RGB
+                        };
+                        nint pBmi = Marshal.AllocHGlobal(Marshal.SizeOf<BITMAPINFOHEADER>());
+                        try
+                        {
+                            Marshal.StructureToPtr(bmi, pBmi, false);
+                            SetDIBitsToDevice(hdc, 0, 0, (uint)f.Width, (uint)f.Height, 0, 0, 0, (uint)f.Height, f.Data, pBmi, 0);
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(pBmi);
+                        }
+
+                        EndPaint(_hwnd, psPtr);
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(psPtr);
+                    }
+
+                    _helper.ReleaseFrame();
+                    _pendingFrame = null;
+                    return IntPtr.Zero;
+                }
+                break; // fall through to DefWindowProc if no frame
+            }
         }
 
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -427,25 +543,28 @@ internal static partial class Program
         uint dpi = GetDpiForWindow(_hwnd);
         double scale = dpi / 96.0;
 
+        GetClientRect(_hwnd, out var rc);
+        int width = rc.right - rc.left;
+        int height = rc.bottom - rc.top;
+
         try
         {
             _ghostty = new GhosttyApp(
-                _hwnd, scale,
+                width, height, scale,
                 wakeup: _ => PostMessageW(_hwnd, WM_GHOSTTY_WAKEUP, IntPtr.Zero, IntPtr.Zero),
                 action: (_, _, _) => false,
                 readClipboard: (_, _, _) => false,
                 confirmReadClipboard: (_, _, _, _) => { },
                 writeClipboard: (_, _, _, _, _) => { },
                 closeSurface: (_, _) => PostMessageW(_hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero));
+
+            _helper = new SharedTextureHelper(width, height);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Ghostty init failed: {ex.Message}");
             return 1;
         }
-
-        GetClientRect(_hwnd, out var rc);
-        _ghostty.SetSize((uint)(rc.right - rc.left), (uint)(rc.bottom - rc.top));
 
         ShowWindow(_hwnd, SW_SHOWDEFAULT);
         UpdateWindow(_hwnd);
