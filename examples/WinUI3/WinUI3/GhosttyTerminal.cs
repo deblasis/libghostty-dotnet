@@ -132,7 +132,7 @@ internal sealed partial class GhosttyTerminal : Grid, IDisposable
             writeClipboard: (_, _, _, _, _) => { },
             closeSurface: (_, _) => DispatcherQueue.TryEnqueue(() => _window.Close()));
 
-        _helper = new SharedTextureHelper(w, h);
+        _helper = new SharedTextureHelper(_ghostty.D3D12Device, w, h);
         _ghostty.SetOcclusion(true);
 
         ApplySize();
@@ -259,7 +259,10 @@ internal sealed partial class GhosttyTerminal : Grid, IDisposable
             if (rc > 0)
             {
                 var text = new string(charBuf, 0, rc);
-                _ghostty.SendText(text);
+                // Only send printable characters as text; control characters
+                // (backspace, enter, tab, etc.) are handled by SendKey above.
+                if (text.Length > 0 && text[0] >= 32)
+                    _ghostty.SendText(text);
                 e.Handled = true;
             }
         }

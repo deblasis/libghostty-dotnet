@@ -26,7 +26,7 @@ internal partial class GhosttyTerminal : FrameworkElement, IDisposable
     private const int VK_CONTROL = 0x11;
     private const int VK_MENU = 0x12;
     private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5c;
+    private const int VK_RWIN = 0x5C;
     private const int VK_CAPITAL = 0x14;
     private const int VK_NUMLOCK = 0x90;
 
@@ -145,7 +145,7 @@ internal partial class GhosttyTerminal : FrameworkElement, IDisposable
                 throw new InvalidOperationException("ghostty_surface_new failed");
             }
 
-            _helper = new SharedTextureHelper(w, h);
+            _helper = new SharedTextureHelper(NativeMethods.ghostty_surface_get_d3d12_device(_surface), w, h);
         }
         catch (Exception ex)
         {

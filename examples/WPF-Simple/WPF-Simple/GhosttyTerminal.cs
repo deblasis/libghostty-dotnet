@@ -87,7 +87,7 @@ internal partial class GhosttyTerminal : FrameworkElement, IDisposable
                 writeClipboard: (_, _, _, _, _) => { },
                 closeSurface: (_, _) => Dispatcher.BeginInvoke(() => window.Close()));
 
-            _helper = new SharedTextureHelper(w, h);
+            _helper = new SharedTextureHelper(_ghostty.D3D12Device, w, h);
         }
         catch (Exception ex)
         {

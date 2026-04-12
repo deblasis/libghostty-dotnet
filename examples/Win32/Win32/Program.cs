@@ -11,8 +11,6 @@ internal static partial class Program
     private static char _highSurrogate;
     private static SharedTextureHelper? _helper;
 
-    private const int WM_APP = 0x8000;
-    private const int WM_GHOSTTY_WAKEUP = WM_APP + 1;
     private const int WM_GHOSTTY_RESIZE_TIMER = 1;
     private const int WM_GHOSTTY_RENDER_TIMER = 2;
     private const int RESIZE_TIMER_MS = 8;
@@ -156,15 +154,14 @@ internal static partial class Program
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct PAINTSTRUCT
+    private unsafe struct PAINTSTRUCT
     {
         public IntPtr hdc;
         public int fErase;
         public int rcPaint_left, rcPaint_top, rcPaint_right, rcPaint_bottom;
         public int fRestore;
         public int fIncUpdate;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] rgbReserved;
+        public fixed byte rgbReserved[32];
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -202,6 +199,7 @@ internal static partial class Program
 
     // Win32 message constants
     private const uint WM_DESTROY = 0x0002;
+    private const uint WM_PAINT = 0x000F;
     private const uint WM_SIZE = 0x0005;
     private const uint WM_SETFOCUS = 0x0007;
     private const uint WM_KILLFOCUS = 0x0008;
@@ -354,7 +352,7 @@ internal static partial class Program
 
     // --- WndProc ---
 
-    private static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp)
+    private static unsafe IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp)
     {
         switch (msg)
         {
@@ -553,57 +551,44 @@ internal static partial class Program
                 PostQuitMessage(0);
                 return IntPtr.Zero;
 
-            case 0x000F: // WM_PAINT
+            case WM_PAINT:
             {
                 if (_pendingFrame != null && _helper != null)
                 {
                     var f = _pendingFrame.Value;
-                    var psPtr = Marshal.AllocHGlobal(64);
+                    PAINTSTRUCT ps;
+                    var hdc = BeginPaint(_hwnd, (nint)(&ps));
+
+                    var bmi = new BITMAPINFOHEADER
+                    {
+                        biSize = (uint)sizeof(BITMAPINFOHEADER),
+                        biWidth = f.Width,
+                        biHeight = -f.Height,
+                        biPlanes = 1,
+                        biBitCount = 32,
+                        biCompression = 0,
+                    };
+
+                    // D3D12 readback row pitch is 256-byte aligned; copy to packed buffer
+                    int stride = f.Width * 4;
+                    nint packed = Marshal.AllocHGlobal(stride * f.Height);
                     try
                     {
-                        var hdc = BeginPaint(_hwnd, psPtr);
-
-                        var bmi = new BITMAPINFOHEADER
-                        {
-                            biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                            biWidth = f.Width,
-                            biHeight = -f.Height,
-                            biPlanes = 1,
-                            biBitCount = 32,
-                            biCompression = 0,
-                        };
-
-                        // D3D12 readback row pitch is 256-byte aligned; copy to packed buffer
-                        int stride = f.Width * 4;
-                        nint packed = Marshal.AllocHGlobal(stride * f.Height);
-                        nint pBmi = Marshal.AllocHGlobal(Marshal.SizeOf<BITMAPINFOHEADER>());
-                        try
-                        {
-                            unsafe
-                            {
-                                for (int y = 0; y < f.Height; y++)
-                                    Buffer.MemoryCopy(
-                                        (byte*)f.Data + y * f.RowPitch,
-                                        (byte*)packed + y * stride,
-                                        stride,
-                                        stride);
-                            }
-                            Marshal.StructureToPtr(bmi, pBmi, false);
-                            SetDIBitsToDevice(hdc, 0, 0, (uint)f.Width, (uint)f.Height, 0, 0, 0, (uint)f.Height, packed, pBmi, 0);
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(packed);
-                            Marshal.FreeHGlobal(pBmi);
-                        }
-
-                        EndPaint(_hwnd, psPtr);
+                        for (int y = 0; y < f.Height; y++)
+                            Buffer.MemoryCopy(
+                                (byte*)f.Data + y * f.RowPitch,
+                                (byte*)packed + y * stride,
+                                stride,
+                                stride);
+                        nint pBmi = (nint)(&bmi);
+                        SetDIBitsToDevice(hdc, 0, 0, (uint)f.Width, (uint)f.Height, 0, 0, 0, (uint)f.Height, packed, pBmi, 0);
                     }
                     finally
                     {
-                        Marshal.FreeHGlobal(psPtr);
+                        Marshal.FreeHGlobal(packed);
                     }
 
+                    EndPaint(_hwnd, (nint)(&ps));
                     _helper.ReleaseFrame();
                     _frameHeld = false;
                     _pendingFrame = null;
@@ -674,7 +659,7 @@ internal static partial class Program
                 writeClipboard: (_, _, _, _, _) => { },
                 closeSurface: (_, _) => PostMessageW(_hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero));
 
-            _helper = new SharedTextureHelper(width, height);
+            _helper = new SharedTextureHelper(_ghostty.D3D12Device, width, height);
 
             _ghostty.SetSize((uint)width, (uint)height);
             _ghostty.SetFocus(true);

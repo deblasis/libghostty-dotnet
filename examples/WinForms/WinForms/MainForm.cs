@@ -286,7 +286,7 @@ public partial class MainForm : Form
             closeSurface: (_, _) => BeginInvoke(Close));
 
         _terminalPanel.SetGhostty(_ghostty);
-        _helper = new SharedTextureHelper(w, h);
+        _helper = new SharedTextureHelper(_ghostty.D3D12Device, w, h);
         _bitmap = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
         _ghostty.SetSize((uint)w, (uint)h);

@@ -16,6 +16,7 @@ public sealed unsafe class SharedTextureHelper : IDisposable
 
     private int _width, _height;
     private nint _device;
+    private readonly bool _ownsDevice;
     private nint _commandQueue;
     private nint _commandAllocator;
     private nint _commandList;
@@ -29,7 +30,24 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     private ulong _lastVersion;
     private bool _disposed;
 
-    /// <summary>Initializes a new instance of the <see cref="SharedTextureHelper"/> class.</summary>
+    /// <summary>Initializes a new instance using an existing D3D12 device.</summary>
+    /// <param name="device">Existing ID3D12Device COM pointer (borrowed; caller must keep alive).</param>
+    /// <param name="width">Width of the texture in pixels.</param>
+    /// <param name="height">Height of the texture in pixels.</param>
+    public SharedTextureHelper(nint device, int width, int height)
+    {
+        _width = width;
+        _height = height;
+        _ownsDevice = false;
+        _device = device;
+
+        if (_device == 0)
+            throw new ArgumentException("Device pointer must not be zero.", nameof(device));
+
+        InitCommandInfrastructure();
+    }
+
+    /// <summary>Initializes a new instance creating its own D3D12 device.</summary>
     /// <param name="width">Width of the texture in pixels.</param>
     /// <param name="height">Height of the texture in pixels.</param>
     /// <exception cref="InvalidOperationException">If D3D12 device creation or initialization fails.</exception>
@@ -37,12 +55,18 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     {
         _width = width;
         _height = height;
+        _ownsDevice = true;
 
         var iidDevice = IID.ID3D12Device;
         int hrDev = D3D12.D3D12CreateDevice(0, D3D12.FEATURE_LEVEL_11_0, ref iidDevice, out _device);
         if (hrDev < 0 || _device == 0)
             throw new InvalidOperationException($"D3D12CreateDevice failed: 0x{hrDev:X8} device=0x{_device:X}");
 
+        InitCommandInfrastructure();
+    }
+
+    private void InitCommandInfrastructure()
+    {
         var queueDesc = new D3D12.COMMAND_QUEUE_DESC
         {
             Type = D3D12.COMMAND_LIST_TYPE_DIRECT,
@@ -260,8 +284,14 @@ public sealed unsafe class SharedTextureHelper : IDisposable
 
             return null;
         }
-        catch
+        catch (InvalidOperationException)
         {
+            // D3D12 API failure -- caller can retry next frame
+            return null;
+        }
+        catch (COMException)
+        {
+            // COM error from D3D12 -- device lost or similar
             return null;
         }
         finally
@@ -340,7 +370,13 @@ public sealed unsafe class SharedTextureHelper : IDisposable
     {
         if (_disposed) return;
 
-        // Release native resources (always, not just when disposing)
+        // Unmap before releasing -- releasing a mapped buffer is UB.
+        if (_readbackBuffer != 0 && _readbackMapped)
+        {
+            D3D12.ResourceUnmap(_readbackBuffer, 0, 0);
+            _readbackMapped = false;
+        }
+
         if (_sharedResource != 0) D3D12.Release(_sharedResource);
         if (_sharedFence != 0) D3D12.Release(_sharedFence);
         if (_readbackBuffer != 0) D3D12.Release(_readbackBuffer);
@@ -349,6 +385,8 @@ public sealed unsafe class SharedTextureHelper : IDisposable
         if (_commandAllocator != 0) D3D12.Release(_commandAllocator);
         if (_commandQueue != 0) D3D12.Release(_commandQueue);
         if (_copyFenceEvent != 0) CloseHandle(_copyFenceEvent);
+        // Only release the device if we created it.
+        if (_ownsDevice && _device != 0) D3D12.Release(_device);
 
         _sharedResource = 0;
         _sharedFence = 0;

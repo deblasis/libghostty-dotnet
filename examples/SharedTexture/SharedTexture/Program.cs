@@ -45,6 +45,25 @@ class MainForm : Form
 
     protected override bool IsInputKey(Keys keyData) => true;
 
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (_ghostty == null || _helper == null) return;
+
+        int w = ClientSize.Width;
+        int h = ClientSize.Height;
+        if (w <= 0 || h <= 0) return;
+        if (w == _width && h == _height) return;
+
+        _width = w;
+        _height = h;
+
+        _helper.Resize(w, h);
+        _bitmap?.Dispose();
+        _bitmap = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        _ghostty.SetSize((uint)w, (uint)h);
+    }
+
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
@@ -68,7 +87,7 @@ class MainForm : Form
             _ghostty.SetFocus(true);
             _ghostty.SetOcclusion(true);
 
-            _helper = new SharedTextureHelper(_width, _height);
+            _helper = new SharedTextureHelper(_ghostty.D3D12Device, _width, _height);
 
             _timer = new System.Windows.Forms.Timer { Interval = 16 };
             _timer.Tick += (_, _) => DoFrame();
