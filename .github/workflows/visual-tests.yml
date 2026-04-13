@@ -10,7 +10,7 @@ jobs:
   visual-tests:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup .NET 9
         uses: actions/setup-dotnet@v4
