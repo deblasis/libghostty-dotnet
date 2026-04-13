@@ -13,7 +13,7 @@ jobs:
       new_commit: ${{ steps.check.outputs.commit }}
       new_version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check for upstream changes
         id: check
@@ -61,7 +61,7 @@ jobs:
             artifact: libghostty-vt.dylib
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
@@ -95,7 +95,7 @@ jobs:
     needs: build-native
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Clone Ghostty headers
         run: |
@@ -130,7 +130,7 @@ jobs:
     needs: [check-upstream, build-native, regenerate-bindings]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
